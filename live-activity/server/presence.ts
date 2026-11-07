@@ -1,6 +1,6 @@
 // 各 App 上报的「刚刚有人在用」：普通通知按 daemon 官方规则（agent-attention-policy）决定发不发——
 // 3 分钟内有设备活跃，就由 daemon 选的那台在应用内弹通知，不再远程推送；都不活跃才推。
-// 插件拿不到 daemon 的决策（0.15.x 不下发 shouldPush），只能靠 App 自己报：连着哪些机器、多久没操作了。
+// 只在 daemon 没给决策时用（未打 daemon/ 下的通知补丁，0.15.x 原版不下发 shouldPush）：靠 App 自己报连着哪些机器、多久没操作了。
 
 /** 同 daemon 的 PRESENCE_THRESHOLD_MS。 */
 export const PRESENCE_MS = 180_000;

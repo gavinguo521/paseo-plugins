@@ -30,6 +30,7 @@ export default function contribute(server: PluginServerContext) {
       configured: engine.configuredFor(input.environment),
       serverId: await engine.selfServerId(paseo),
       alerts: engine.alertsFor(input.deviceId),
+      // 总是遵守：有官方决策用决策，没有就用在用状态兜底（见 sendAlerts）。
       followsOfficialPolicy: true,
     };
   });

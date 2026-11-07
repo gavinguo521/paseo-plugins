@@ -1,6 +1,6 @@
 // 各机器会话数据源：本机与已关联机器（connected hosts）都先尝试订阅，订阅失败或中断就降级为每 30 秒轮询。
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { checkAlert, scanAlerts, type AlertEvent, type NotifiedMap } from "./notify.ts";
+import { readNotificationDecision, type NotificationDecision } from "./notification-decision.ts";
 import { latestReplyFromEntries } from "./preview.ts";
 import { toLite, type AgentLite, type HostData, type HostRef, type WorkspaceInfo } from "./summary.ts";
 
@@ -33,13 +33,10 @@ interface SourceOptions {
   open(): Promise<Api>;
   release(api: Api): Promise<void>;
   onChange(): void;
-  /** 需要发普通通知（daemon 的提醒信号有新的时间戳）。 */
-  onAlert(serverId: string, event: AlertEvent, workspaces: ReadonlyMap<string, WorkspaceInfo>): void;
+  /** daemon 允许远程推送的通知事件（旧 daemon 无决策字段时兼容原推送行为）。 */
+  onAlert(serverId: string, event: NotificationDecision): void;
   log(line: string): void;
 }
-
-/** 列表来源：首次加载 / 订阅快照只建基线；轮询拿到的列表与上一份对比（该数据源第一份列表除外）。 */
-type ListKind = "snapshot" | "poll";
 
 /** 一台机器的会话列表。agents 为 null 表示当前拿不到数据（离线）。 */
 export class AgentSource {
@@ -54,10 +51,12 @@ export class AgentSource {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private lastError: string | null = null;
   private closed = false;
-  /** agentId → 已通知过（或作为基线见过）的 attentionTimestamp。 */
-  private notified: NotifiedMap = new Map();
-  /** 是否已有第一份列表作为基线。 */
-  private baselined = false;
+  private attention: ReturnType<Api["observeEvents"]> | null = null;
+  private unobserveAttention: (() => void) | null = null;
+  private warnedLegacy = false;
+  notificationDecisionReady = false;
+  private attentionRetry: ReturnType<typeof setTimeout> | null = null;
+  private attentionRetryMs = 1000;
 
   constructor(private readonly opts: SourceOptions) {}
 
@@ -69,12 +68,13 @@ export class AgentSource {
   async start() {
     try {
       const api = await this.ensureApi();
+      await this.attention?.ready.catch(() => {});
       const result = await withTimeout(api.agents.list({ ...LIST_OPTIONS, subscribe: {} }), CONNECT_TIMEOUT_MS, "订阅会话列表");
       if (this.closed) { await result.subscription.release().catch(() => {}); return; }
       this.subscription = result.subscription;
-      await this.replace(api, result, "snapshot");
+      await this.replace(api, result);
       this.unsubscribe = result.subscription.subscribe({
-        snapshot: snapshot => { void this.replace(api, snapshot as ListResult, "snapshot").catch(() => {}); },
+        snapshot: snapshot => { void this.replace(api, snapshot as ListResult).catch(() => {}); },
         update: msg => this.apply(msg as UpdateMessage),
         error: error => { void this.downgrade(`订阅中断：${message(error)}`); },
       });
@@ -102,11 +102,64 @@ export class AgentSource {
   }
 
   private async ensureApi(): Promise<Api> {
-    if (!this.api) this.api = await withTimeout(this.opts.open(), CONNECT_TIMEOUT_MS, "连接机器");
+    if (!this.api) {
+      const api = await withTimeout(this.opts.open(), CONNECT_TIMEOUT_MS, "连接机器");
+      if (this.closed) { await this.opts.release(api); throw new Error("数据源已关闭"); }
+      this.api = api;
+    }
+    this.observeAttention(this.api);
+
     return this.api;
   }
 
+  private observeAttention(api: Api) {
+    if (this.closed || this.attention || this.attentionRetry) return;
+    // notifications=false：插件只观察决策，绝不能成为官方选中的活跃通知接收端。
+    const attention = api.observeEvents(["agent_attention_required"], { notifications: false });
+    this.attention = attention;
+    this.unobserveAttention = attention.subscribe({
+      snapshot: snapshot => {
+        this.notificationDecisionReady = (snapshot as unknown as { notificationDecision?: string }).notificationDecision === "official-v1";
+        this.attentionRetryMs = 1000;
+      },
+      update: message => {
+        const event = readNotificationDecision(message, Date.now());
+        if (!event) return;
+        if (event.shouldPush === undefined && !this.warnedLegacy) {
+          this.warnedLegacy = true;
+          this.opts.log(`${this.opts.name}：daemon 未提供远程推送决策，暂沿用旧版推送行为；需要安装通知接口补丁`);
+        }
+        if (event.shouldPush !== false && event.reason !== "error") this.opts.onAlert(this.serverId, event);
+      },
+      error: error => this.retryAttention(attention, error),
+    });
+    void attention.ready.catch(error => this.retryAttention(attention, error));
+  }
+
+  private retryAttention(attention: ReturnType<Api["observeEvents"]>, error: unknown) {
+    if (this.closed || this.attention !== attention) return;
+    this.opts.log(`${this.opts.name}：通知订阅失败，稍后重试：${message(error)}`);
+    this.notificationDecisionReady = false;
+    this.unobserveAttention?.();
+    this.unobserveAttention = null;
+    this.attention = null;
+    void attention.release().catch(() => {});
+    const delay = this.attentionRetryMs;
+    this.attentionRetryMs = Math.min(delay * 2, 30_000);
+    this.attentionRetry = setTimeout(() => {
+      this.attentionRetry = null;
+      if (this.api) this.observeAttention(this.api);
+    }, delay);
+  }
+
   private async teardown() {
+    if (this.attentionRetry) clearTimeout(this.attentionRetry);
+    this.attentionRetry = null;
+    this.notificationDecisionReady = false;
+    this.unobserveAttention?.();
+    this.unobserveAttention = null;
+    await this.attention?.release().catch(() => {});
+    this.attention = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
     const subscription = this.subscription;
@@ -120,7 +173,11 @@ export class AgentSource {
   private async downgrade(reason: string) {
     if (this.pollTimer || this.closed) return;
     this.opts.log(`${this.opts.name}：${reason}，改为每 30 秒轮询`);
-    await this.teardown();
+    // 列表轮询不接管通知；保留事件订阅，重连由 SDK 恢复。
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    await this.subscription?.release().catch(() => {});
+    this.subscription = null;
     this.pollTimer = setInterval(() => { void this.pollOnce(); }, POLL_MS);
     await this.pollOnce();
   }
@@ -130,25 +187,18 @@ export class AgentSource {
     try {
       const api = await this.ensureApi();
       const result = await withTimeout(api.agents.list(LIST_OPTIONS), CONNECT_TIMEOUT_MS, "拉取会话列表");
-      // 轮询模式下与上一份列表对比；订阅模式里机器恢复在线时的补拉算重连，只建基线。
-      await this.replace(api, result, this.pollTimer ? "poll" : "snapshot");
+      await this.replace(api, result);
       this.lastError = null;
     } catch (error) {
       const text = message(error);
       if (text !== this.lastError) this.opts.log(`${this.opts.name}：拉取会话失败：${text}`);
       this.lastError = text;
-      // 只在轮询模式下丢掉连接，下次重连；订阅模式的连接由客户端自己恢复。
-      if (this.pollTimer) {
-        const api = this.api;
-        this.api = null;
-        if (api) await this.opts.release(api).catch(() => {});
-      }
       this.markOffline();
     }
   }
 
   /** 用一份完整列表替换（超过一页时继续翻页）。 */
-  private async replace(api: Api, first: ListResult, kind: ListKind) {
+  private async replace(api: Api, first: ListResult) {
     const entries = [...first.entries];
     let page = first;
     for (let i = 1; i < MAX_PAGES && page.pageInfo?.hasMore && page.pageInfo.nextCursor; i++) {
@@ -161,12 +211,8 @@ export class AgentSource {
       if (agent && !agent.archivedAt) next.set(agent.id, toLite(agent));
     }
     if (this.closed) return;
-    const baseline = kind === "snapshot" || !this.baselined;
-    const alerts = scanAlerts(next, this.serverId, this.notified, Date.now(), baseline);
-    this.baselined = true;
     this.agents = next;
     this.opts.onChange();
-    for (const event of alerts) this.emitAlert(event);
     void this.refreshWorkspaces(api, true);
   }
 
@@ -203,11 +249,6 @@ export class AgentSource {
     }
   }
 
-  private emitAlert(event: AlertEvent) {
-    try { this.opts.onAlert(this.serverId, event, this.workspaces); }
-    catch (error) { this.opts.log(`${this.opts.name}：处理通知出错：${message(error)}`); }
-  }
-
   private apply(msg: UpdateMessage) {
     if (msg.type !== "agent_update" || !this.agents) return;
     const payload = msg.payload as { kind: "upsert"; agent: AgentLite } | { kind: "remove"; agentId: string } | undefined;
@@ -217,8 +258,6 @@ export class AgentSource {
       else {
         const lite = toLite(payload.agent);
         this.agents.set(lite.id, lite);
-        const event = checkAlert(lite, this.serverId, this.agents, this.notified, Date.now());
-        if (event) this.emitAlert(event);
         if (lite.workspaceId && !this.workspaces.has(lite.workspaceId) && this.api) void this.refreshWorkspaces(this.api, false);
       }
     } else if (payload.kind === "remove") {
@@ -287,6 +326,12 @@ export class Sources {
       REPLY_TIMEOUT_MS, "拉取最后回复");
     if (page.error) throw new Error(page.error);
     return latestReplyFromEntries(page.entries ?? []);
+  }
+
+  notificationContext(serverId: string, agentId: string) {
+    const source = this.sources.get(serverId);
+    const agent = source?.agents?.get(agentId);
+    return agent ? { agent, workspaces: source!.workspaces } : null;
   }
 
   hostData(host: HostRef): HostData {

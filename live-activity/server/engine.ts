@@ -2,11 +2,13 @@
 import type { LastPush, RegisterInput } from "../shared/contracts.ts";
 import { ApnsClient, validateKey, type ApnsKey, type ApnsKeys } from "./apns.ts";
 import { applyRegister, applyResult, decide, isDeadToken, newDevice, settleIdle, type Device, type Environment } from "./decide.ts";
-import { alertsEnabled, alertTargets, buildAlertPayload, ALERT_MAX_AGE_MS, type AlertEvent } from "./notify.ts";
+import { alertsEnabled, alertTargets, buildAlertPayload, ALERT_MAX_AGE_MS } from "./notify.ts";
 import { Presence } from "./presence.ts";
 import { Sources, type Api } from "./sources.ts";
 import { Store } from "./store.ts";
-import { buildState, type WorkspaceInfo } from "./summary.ts";
+import { buildState } from "./summary.ts";
+
+import { decisionPayload, type NotificationDecision } from "./notification-decision.ts";
 
 const DEBOUNCE_MS = 1500;
 const TICK_MS = 60_000;
@@ -75,7 +77,7 @@ export class LiveActivity {
 
   private async start(paseo: Api) {
     await this.ready;
-    const sources = new Sources(paseo, () => this.schedule(), log, (serverId, event, workspaces) => this.notify(serverId, event, workspaces));
+    const sources = new Sources(paseo, () => this.schedule(), log, (serverId, event) => this.notify(serverId, event));
     this.sources = sources;
     await sources.init();
     await sources.sync(this.allHosts());
@@ -146,44 +148,34 @@ export class LiveActivity {
   }
 
   /** daemon 的提醒信号有新时间戳：给相关设备发普通通知（同一会话同一时间戳只发一次）。 */
-  private notify(serverId: string, event: AlertEvent, workspaces: ReadonlyMap<string, WorkspaceInfo>) {
+  private notify(serverId: string, event: NotificationDecision) {
     if (this.disposed) return;
     const now = Date.now();
-    const key = `${serverId}:${event.agent.id}:${event.timestamp}`;
+    const key = `${serverId}:${event.agentId}:${event.reason}:${event.permissionRequestId ?? ""}:${event.timestamp}`;
     if (this.alerted.has(key)) return;
     for (const [k, at] of this.alerted) if (now - at > 2 * ALERT_MAX_AGE_MS) this.alerted.delete(k);
     this.alerted.set(key, now);
     this.alertChain = this.alertChain
-      .then(() => this.sendAlerts(serverId, event, workspaces))
+      .then(() => this.sendAlerts(serverId, event))
       .catch(error => log(`发送通知出错：${(error as Error).message}`));
-  }
-
-  /** 「完成」通知正文用会话最后一条回复；取不到返回 null（退回原正文，照常发通知）。 */
-  private async lastReply(serverId: string, agentId: string): Promise<string | null> {
-    try {
-      return await this.sources?.lastReply(serverId, agentId) ?? null;
-    } catch (error) {
-      log(`取会话 ${agentId.slice(0, 8)} 最后回复失败，正文退回项目名：${(error as Error).message}`);
-      return null;
-    }
   }
 
   reportPresence(deviceId: string, idleMs: number, servers: readonly string[]) {
     this.presence.report(deviceId, idleMs, servers, Date.now());
   }
 
-  private async sendAlerts(serverId: string, event: AlertEvent, workspaces: ReadonlyMap<string, WorkspaceInfo>) {
-    // 官方规则：有设备在用，daemon 会让它在应用内弹（正看着这个会话时谁都不弹），远程推送就不发。
-    const active = this.presence.activeOn(serverId, Date.now());
-    if (active) {
-      log(`通知（${event.reason}）不推送：设备 ${active.slice(0, 8)} 正在使用，交给 daemon 选中的设备`);
-      return;
+  private async sendAlerts(serverId: string, event: NotificationDecision) {
+    // 打过通知补丁的 daemon 给了 shouldPush（false 的在 sources 已过滤），照它的；
+    // 没给（未打补丁）就按 App 上报的在用状态兜底：有设备在用，daemon 会让它在应用内弹，不再推。
+    if (event.shouldPush === undefined) {
+      const active = this.presence.activeOn(serverId, Date.now());
+      if (active) {
+        log(`通知（${event.reason}）不推送：设备 ${active.slice(0, 8)} 正在使用，交给 daemon 选中的设备`);
+        return;
+      }
     }
     let dirty = false;
     const targets = alertTargets(this.devices.values(), serverId);
-    // 有设备真的会收到时才去取最后回复（所有设备共用一次）。
-    const sendable = targets.some(t => this.apns.configuredFor(t.device.environment));
-    const assistantMessage = event.reason === "finished" && sendable ? await this.lastReply(serverId, event.agent.id) : null;
     if (this.disposed) return;
     for (const { device, hostLabel } of targets) {
       if (this.disposed) return;
@@ -196,9 +188,14 @@ export class LiveActivity {
         this.warnedUnconfigured.add(device.environment);
         continue;
       }
-      const payload = buildAlertPayload({ serverId, hostLabel, agent: event.agent, reason: event.reason, workspaces, requestId: event.requestId, assistantMessage });
+      const payload = decisionPayload(serverId, event);
+      // 保留已有工作区标题，正文使用该次事件的官方快照，避免再次拉取时串到下一回合。
+      const context = this.sources?.notificationContext(serverId, event.agentId);
+      if (context) payload.aps.alert = { ...event.notification, title: buildAlertPayload({
+        serverId, hostLabel, ...context, reason: event.reason, requestId: event.permissionRequestId,
+      }).aps.alert.title };
       const result = await this.apns.send(device.environment, token, device.bundleId, 10, payload, {
-        pushType: "alert", collapseId: event.agent.id,
+        pushType: "alert", collapseId: event.agentId,
       });
       const at = Date.now();
       this.lastPush = { at, ok: result.ok, status: result.status, reason: result.reason };

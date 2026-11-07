@@ -23,8 +23,8 @@ export const activityRegister = defineRpc({
   name: "activity.register",
   input: registerInput,
   // alerts = 该设备有 alertToken 且其环境已配密钥（插件会给它发普通通知）；App 只在为 true 时停掉后台本地通知。
-  // followsOfficialPolicy = 插件按 presence.report 遵守官方规则：有设备在用就不推，交给 daemon 选的设备应用内弹，
-  // 所以 App 被选中时即使在后台也要自己弹（旧版插件没有这个字段）。
+  // followsOfficialPolicy = 插件遵守官方规则：daemon 给了 shouldPush 就照它，没给就按 presence.report 兜底
+  // （有设备在用就不推，交给 daemon 选的设备应用内弹），所以 App 被选中时即使在后台也要自己弹（旧版插件没有这个字段）。
   output: z.object({
     configured: z.boolean(), serverId: z.string(), alerts: z.boolean(), followsOfficialPolicy: z.boolean().optional(),
   }),

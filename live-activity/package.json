@@ -7,11 +7,13 @@
     "paseo-plugin.json",
     "index.server.ts",
     "server/",
-    "shared/"
+    "shared/",
+    "daemon/prepare.ts"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test test/*.test.ts"
+    "test": "node --experimental-transform-types --test test/*.test.ts",
+    "test:daemon": "node --experimental-strip-types --test daemon/integration.test.ts"
   },
   "devDependencies": {
     "@getpaseo/plugin": "^0.15.0",
