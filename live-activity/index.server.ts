@@ -1,6 +1,6 @@
 // 实时活动推送插件：App 不在前台时，经 APNs 把本机与已关联机器上的会话汇总推到 iOS 灵动岛 / 锁屏。
 import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { activityConfigure, activityRegister, activityStatus, activityUnregister } from "./shared/contracts.ts";
+import { activityConfigure, activityRegister, activityStatus, activityUnregister, presenceReport } from "./shared/contracts.ts";
 import { LiveActivity } from "./server/engine.ts";
 
 // hooks 只当「状态可能变了」的触发器，真正的数据来自会话列表订阅。
@@ -30,7 +30,14 @@ export default function contribute(server: PluginServerContext) {
       configured: engine.configuredFor(input.environment),
       serverId: await engine.selfServerId(paseo),
       alerts: engine.alertsFor(input.deviceId),
+      followsOfficialPolicy: true,
     };
+  });
+
+  server.handle(presenceReport, async ({ deviceId, idleMs, servers }, { paseo }) => {
+    void engine.ensureStarted(paseo);
+    engine.reportPresence(deviceId, idleMs, servers);
+    return { ok: true };
   });
 
   server.handle(activityUnregister, async ({ deviceId }, { paseo }) => {

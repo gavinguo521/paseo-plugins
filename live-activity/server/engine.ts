@@ -3,6 +3,7 @@ import type { LastPush, RegisterInput } from "../shared/contracts.ts";
 import { ApnsClient, validateKey, type ApnsKey, type ApnsKeys } from "./apns.ts";
 import { applyRegister, applyResult, decide, isDeadToken, newDevice, settleIdle, type Device, type Environment } from "./decide.ts";
 import { alertsEnabled, alertTargets, buildAlertPayload, ALERT_MAX_AGE_MS, type AlertEvent } from "./notify.ts";
+import { Presence } from "./presence.ts";
 import { Sources, type Api } from "./sources.ts";
 import { Store } from "./store.ts";
 import { buildState, type WorkspaceInfo } from "./summary.ts";
@@ -31,6 +32,7 @@ export class LiveActivity {
   /** 已经提示过「没配这个环境的密钥」的环境，免得每次都打日志。 */
   private warnedUnconfigured = new Set<Environment>();
   private disposed = false;
+  private presence = new Presence();
   lastPush: LastPush | null = null;
   readonly ready: Promise<void>;
 
@@ -166,7 +168,17 @@ export class LiveActivity {
     }
   }
 
+  reportPresence(deviceId: string, idleMs: number, servers: readonly string[]) {
+    this.presence.report(deviceId, idleMs, servers, Date.now());
+  }
+
   private async sendAlerts(serverId: string, event: AlertEvent, workspaces: ReadonlyMap<string, WorkspaceInfo>) {
+    // 官方规则：有设备在用，daemon 会让它在应用内弹（正看着这个会话时谁都不弹），远程推送就不发。
+    const active = this.presence.activeOn(serverId, Date.now());
+    if (active) {
+      log(`通知（${event.reason}）不推送：设备 ${active.slice(0, 8)} 正在使用，交给 daemon 选中的设备`);
+      return;
+    }
     let dirty = false;
     const targets = alertTargets(this.devices.values(), serverId);
     // 有设备真的会收到时才去取最后回复（所有设备共用一次）。

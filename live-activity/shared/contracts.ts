@@ -23,7 +23,23 @@ export const activityRegister = defineRpc({
   name: "activity.register",
   input: registerInput,
   // alerts = 该设备有 alertToken 且其环境已配密钥（插件会给它发普通通知）；App 只在为 true 时停掉后台本地通知。
-  output: z.object({ configured: z.boolean(), serverId: z.string(), alerts: z.boolean() }),
+  // followsOfficialPolicy = 插件按 presence.report 遵守官方规则：有设备在用就不推，交给 daemon 选的设备应用内弹，
+  // 所以 App 被选中时即使在后台也要自己弹（旧版插件没有这个字段）。
+  output: z.object({
+    configured: z.boolean(), serverId: z.string(), alerts: z.boolean(), followsOfficialPolicy: z.boolean().optional(),
+  }),
+});
+
+export const presenceReport = defineRpc({
+  name: "presence.report",
+  input: z.object({
+    deviceId: z.string().min(1).max(200),
+    // 距上次操作的毫秒数（App 算，避开两边时钟不一致）。
+    idleMs: z.number().int().min(0).max(7 * 24 * 3600 * 1000),
+    // 这台设备当前连着的机器 serverId：daemon 只会在这些机器的会话上选它弹应用内通知。
+    servers: z.array(z.string().min(1).max(200)).max(50),
+  }),
+  output: z.object({ ok: z.boolean() }),
 });
 
 export const activityUnregister = defineRpc({
