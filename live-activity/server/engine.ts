@@ -88,7 +88,10 @@ export class LiveActivity {
   }
 
   private async load() {
-    await this.bark.ready;
+    try {
+      await this.bark.ready;
+      if (this.bark.loadError) log(this.bark.loadError);
+    } catch (error) { log(`读取 Bark 配置失败：${(error as Error).message}`); }
     try {
       for (const device of await this.store.loadDevices()) this.devices.set(device.deviceId, device);
     } catch (error) { log(`读取设备记录失败：${(error as Error).message}`); }

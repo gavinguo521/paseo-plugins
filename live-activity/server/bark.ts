@@ -39,6 +39,8 @@ export class BarkDelivery {
   private chain: Promise<unknown> = Promise.resolve();
   private readonly path: string;
   private lastPush: BarkResult | null = null;
+  /** Set when bark.json exists but cannot be used; the engine logs it and keeps running. */
+  loadError: string | null = null;
   readonly ready: Promise<void>;
 
   constructor(private dir: string, private request: typeof fetch = fetch, private now = Date.now) {
@@ -54,7 +56,11 @@ export class BarkDelivery {
           || config.endpoint !== `${endpoint.origin}/push`) throw new Error("Invalid endpoint");
       this.config = config;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("无法读取 Bark 配置，请检查主机上的配置文件。");
+      // 损坏或版本不认识的配置按「未配置」处理：不能拖垮灵动岛/APNs，用户在设置页重新保存或移除即可覆盖。
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.config = null;
+        this.loadError = "无法读取 Bark 配置，已按未配置处理；请在设置页重新保存推送地址。";
+      }
     }
   }
 

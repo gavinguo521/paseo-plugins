@@ -179,6 +179,25 @@ test("configuration is private, host-scoped, durable, and removal survives resta
   assert.equal(empty.status().configured, false);
 });
 
+test("corrupt or unknown-version bark.json is treated as unconfigured and can be overwritten", async t => {
+  const f = await fixture(t);
+  await f.bark.configure("host-a", pushURL);
+  const path = join(f.home, "live-activity", "bark.json");
+  await writeFile(path, JSON.stringify({ version: 2, serverId: "host-a" }));
+  const broken = f.create();
+  await broken.ready;
+  assert.equal(broken.status().configured, false);
+  assert.ok(broken.loadError);
+  assert.ok(!broken.loadError!.includes(key));
+  await broken.configure("host-a", pushURL);
+  assert.equal(broken.status().configured, true);
+  await writeFile(path, "{not json");
+  const cleared = f.create();
+  await cleared.ready;
+  await cleared.clear();
+  assert.equal(f.create().status().configured, false);
+});
+
 test("success and pre-session failure send readable messages and task-history deep links", async t => {
   const f = await fixture(t);
   await f.bark.configure("host-a", pushURL);
