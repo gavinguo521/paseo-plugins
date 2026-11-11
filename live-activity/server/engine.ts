@@ -7,6 +7,8 @@ import { Presence } from "./presence.ts";
 import { Sources, type Api } from "./sources.ts";
 import { Store } from "./store.ts";
 import { buildState } from "./summary.ts";
+import { ScheduleNotifications, type ScheduleResultPayload } from "./schedule-notifications.ts";
+import { BarkDelivery } from "./bark.ts";
 
 import { decisionPayload, type NotificationDecision } from "./notification-decision.ts";
 
@@ -35,14 +37,58 @@ export class LiveActivity {
   private warnedUnconfigured = new Set<Environment>();
   private disposed = false;
   private presence = new Presence();
+  private scheduleTick: ReturnType<typeof setInterval> | null = null;
+  readonly scheduleNotifications: ScheduleNotifications;
+  readonly bark: BarkDelivery;
   lastPush: LastPush | null = null;
   readonly ready: Promise<void>;
 
   constructor(private readonly store = new Store()) {
+    this.bark = new BarkDelivery(store.dir);
+    this.scheduleNotifications = new ScheduleNotifications(store.dir, {
+      targets: serverId => {
+        if (this.disposed) return [];
+        const bark = this.bark.targetFor(serverId);
+        // One selected transport for task results; do not notify the same phone
+        // through both Bark and the app's APNs registration.
+        return bark ? [bark] : alertTargets(this.devices.values(), serverId)
+          .filter(({ device }) => this.alertsFor(device.deviceId)).map(({ device }) => device.deviceId);
+      },
+      availableSince: target => this.bark.availableSince(target),
+      send: (deviceId, payload, collapseId) => deviceId.startsWith("bark:")
+        ? this.bark.sendResult(deviceId, payload, collapseId) : this.sendScheduleResult(deviceId, payload, collapseId),
+    }, Date.now, log);
     this.ready = this.load();
+    // Start without waiting for a hook or a foreground phone. A run can fail before
+    // creating an agent, including immediately after the daemon restarts.
+    void this.ready.then(() => {
+      if (this.disposed) return;
+      const poll = () => { void this.scheduleNotifications.poll().catch(() => log("计划任务通知检查失败，将稍后重试")); };
+      this.scheduleTick = setInterval(poll, 15_000);
+      this.scheduleTick.unref();
+      poll();
+    }).catch(() => log("推送配置读取失败，请检查主机配置文件"));
+  }
+
+  private async sendScheduleResult(deviceId: string, payload: ScheduleResultPayload, collapseId: string): Promise<boolean> {
+    const device = this.devices.get(deviceId);
+    if (this.disposed || !device || !this.alertsFor(deviceId)
+        || !device.hosts.some(h => h.serverId === payload.serverId)) return false;
+    const token = device.alertToken!;
+    // This is a per-schedule opt-in. Unlike ordinary chat completion notifications,
+    // it is not suppressed when a Mac is active or the run's agent was archived.
+    const result = await this.apns.send(device.environment, token, device.bundleId, 10, payload, { pushType: "alert", collapseId });
+    this.lastPush = { at: Date.now(), ok: result.ok, status: result.status, reason: result.reason };
+    if (!result.ok && isDeadToken(result.status, result.reason) && device.alertToken === token) {
+      device.alertToken = null;
+      await this.persist();
+    }
+    log(`计划任务结果通知：${result.ok ? "成功" : `失败 ${result.status ?? "-"}，等待重试`}`);
+    return result.ok;
   }
 
   private async load() {
+    await this.bark.ready;
     try {
       for (const device of await this.store.loadDevices()) this.devices.set(device.deviceId, device);
     } catch (error) { log(`读取设备记录失败：${(error as Error).message}`); }
@@ -165,7 +211,27 @@ export class LiveActivity {
   }
 
   private async sendAlerts(serverId: string, event: NotificationDecision) {
-    // 打过通知补丁的 daemon 给了 shouldPush（false 的在 sources 已过滤），照它的；
+    if (this.disposed) return;
+    const barkTarget = event.reason === "finished" ? this.bark.completionTargetFor(serverId) : null;
+    if (barkTarget) {
+      // Bark is an explicit phone subscription, independent of which desktop is
+      // active. Observe only; the daemon still delivers its original Mac alert.
+      const context = await this.sources?.resolveNotificationContext(serverId, event.agentId);
+      if (this.disposed) return;
+      if (!context) { log("会话完成通知暂未发送：无法读取会话信息"); return; }
+      const labels = context.agent.labels;
+      // Scheduled runs have their own result notification, including failures
+      // before agent creation. Child agents should notify through their parent.
+      if (labels["paseo.schedule-id"] || labels["paseo.schedule-run"] || labels["paseo.parent-agent-id"]) return;
+      const title = buildAlertPayload({ serverId, hostLabel: "", ...context, reason: "finished" }).aps.alert.title;
+      const ok = await this.bark.sendCompletion(barkTarget, serverId, { ...event,
+        notification: { ...event.notification, title } });
+      log(`Bark 会话完成通知：${ok ? "成功" : "未发送或发送失败"}`);
+      // A configured completion subscription replaces APNs for this event only.
+      return;
+    }
+    if (event.shouldPush === false || event.reason === "error") return;
+    // 打过通知补丁的 daemon 给了 shouldPush，照它的；
     // 没给（未打补丁）就按 App 上报的在用状态兜底：有设备在用，daemon 会让它在应用内弹，不再推。
     if (event.shouldPush === undefined) {
       const active = this.presence.activeOn(serverId, Date.now());
@@ -268,6 +334,7 @@ export class LiveActivity {
     this.disposed = true;
     if (this.debounce) clearTimeout(this.debounce);
     if (this.tick) clearInterval(this.tick);
+    if (this.scheduleTick) clearInterval(this.scheduleTick);
     void this.sources?.close();
     this.apns.close();
   }

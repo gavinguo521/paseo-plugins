@@ -10,7 +10,7 @@
 | [`usage-reset`](usage-reset/OVERVIEW.zh-CN.md) | 侧边栏底部每个账户一行，直接显示 Claude / Codex 各账户 5 小时、周限额还剩多少（用量偏快时变色提醒，列表里有分段进度条和日均可用），点开列出具体刷新时刻（如「周二 10/27 21:00 刷新 · 还有 2 天 8 小时」）。只读 Paseo 已拉取的用量报告 | 已上架插件市场：`paseo plugin add 52216108/usage-reset` |
 | [`next-input`](next-input/OVERVIEW.zh-CN.md) | 打开会话时按需生成一条下一句建议，默认跟随会话选用 Claude 或 Codex（也可固定其中一个），模型可选；点纸飞机直接发送，点文字可编辑 | 已上架插件市场：`paseo plugin add 52216108/next-input` |
 | [`agent-taskboard`](agent-taskboard/OVERVIEW.zh-CN.md) | 在侧边栏打开本机 [agent-taskboard](https://github.com/gavinguo521/agent-taskboard) 看板，需要先在 daemon 主机上启动看板服务 | 从本仓库安装：`paseo plugin add git:gavinguo521/paseo-plugins:agent-taskboard` |
-| `live-activity` | 只有服务端：配合原生 iOS App，App 不在前台时经 APNs 把本机与已关联机器上的会话状态推到灵动岛 / 锁屏实时活动。只装在接收令牌的那台 Mac 上；APNs 密钥在 App 里配置，保存在 daemon 本机 `~/.paseo/live-activity/`（0600） | 从本仓库安装：`paseo plugin add git:gavinguo521/paseo-plugins:live-activity` |
+| `live-activity` | 只有服务端：配合原生 iOS App，经 APNs 推送会话状态到灵动岛 / 锁屏；本机计划任务结果支持 Bark 或 APNs；Bark 也可单独开启普通会话完成通知，Mac 系统通知保留。Bark 无需 Apple 开发者密钥，在原生客户端中粘贴地址即可配置。任务通知插件需安装在执行主机。[任务通知说明](live-activity/SCHEDULE_NOTIFICATIONS.md)。推送凭证只保存在 daemon 本机 `~/.paseo/live-activity/`（0600） | 从本仓库安装：`paseo plugin add git:gavinguo521/paseo-plugins:live-activity` |
 
 插件按 daemon 安装，每台机器各装一次；装之前先在 Settings → Plugins 打开 Enable plugins。
 

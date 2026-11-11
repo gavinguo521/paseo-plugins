@@ -1,6 +1,7 @@
 // 实时活动推送插件：App 不在前台时，经 APNs 把本机与已关联机器上的会话汇总推到 iOS 灵动岛 / 锁屏。
 import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { activityConfigure, activityRegister, activityStatus, activityUnregister, presenceReport } from "./shared/contracts.ts";
+import { activityConfigure, activityRegister, activityStatus, activityUnregister, presenceReport,
+  scheduleNotificationsRead, scheduleNotificationsWrite, barkStatus, barkConfigure, barkClear, barkTest, barkPreferences } from "./shared/contracts.ts";
 import { LiveActivity } from "./server/engine.ts";
 
 // hooks 只当「状态可能变了」的触发器，真正的数据来自会话列表订阅。
@@ -22,6 +23,30 @@ export default function contribute(server: PluginServerContext) {
     engine.schedule();
   };
   const removers = TRIGGERS.map(name => server.addHook(name, trigger));
+
+  server.handle(barkStatus, async (_input, { paseo }) => {
+    await engine.ensureStarted(paseo);
+    return engine.bark.status();
+  });
+  server.handle(barkConfigure, async ({ pushURL }, { paseo }) => {
+    await engine.ensureStarted(paseo);
+    return engine.bark.configure(await engine.selfServerId(paseo), pushURL);
+  });
+  server.handle(barkPreferences, async ({ notifyOnFinish }, { paseo }) => {
+    await engine.ensureStarted(paseo);
+    return engine.bark.setNotifyOnFinish(await engine.selfServerId(paseo), notifyOnFinish);
+  });
+  server.handle(barkClear, async () => engine.bark.clear());
+  server.handle(barkTest, async (_input, { paseo }) => engine.bark.test(await engine.selfServerId(paseo)));
+
+  server.handle(scheduleNotificationsRead, async ({ scheduleId }, { paseo }) => {
+    await engine.ready;
+    return engine.scheduleNotifications.read(await engine.selfServerId(paseo), scheduleId);
+  });
+  server.handle(scheduleNotificationsWrite, async ({ scheduleId, enabled, expectedRevision }, { paseo }) => {
+    await engine.ready;
+    return engine.scheduleNotifications.write(await engine.selfServerId(paseo), scheduleId, enabled, expectedRevision);
+  });
 
   server.handle(activityRegister, async (input, { paseo }) => {
     await engine.ensureStarted(paseo);

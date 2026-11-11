@@ -33,7 +33,7 @@ interface SourceOptions {
   open(): Promise<Api>;
   release(api: Api): Promise<void>;
   onChange(): void;
-  /** daemon 允许远程推送的通知事件（旧 daemon 无决策字段时兼容原推送行为）。 */
+  /** 所有有效提醒，由各通道分别处理 daemon 的推送决策与显式订阅。 */
   onAlert(serverId: string, event: NotificationDecision): void;
   log(line: string): void;
 }
@@ -129,7 +129,7 @@ export class AgentSource {
           this.warnedLegacy = true;
           this.opts.log(`${this.opts.name}：daemon 未提供远程推送决策，暂沿用旧版推送行为；需要安装通知接口补丁`);
         }
-        if (event.shouldPush !== false && event.reason !== "error") this.opts.onAlert(this.serverId, event);
+        if (event.reason !== "error") this.opts.onAlert(this.serverId, event);
       },
       error: error => this.retryAttention(attention, error),
     });
@@ -332,6 +332,17 @@ export class Sources {
     const source = this.sources.get(serverId);
     const agent = source?.agents?.get(agentId);
     return agent ? { agent, workspaces: source!.workspaces } : null;
+  }
+
+  /** A completion may arrive before the list update or just after auto-archive. */
+  async resolveNotificationContext(serverId: string, agentId: string) {
+    const cached = this.notificationContext(serverId, agentId);
+    if (cached) return cached;
+    const source = this.sources.get(serverId);
+    const api = source?.currentApi;
+    if (!api) return null;
+    const result = await withTimeout(api.agents.ref(agentId).refresh(), REPLY_TIMEOUT_MS, "读取通知会话");
+    return result ? { agent: toLite(result.agent), workspaces: source!.workspaces } : null;
   }
 
   hostData(host: HostRef): HostData {

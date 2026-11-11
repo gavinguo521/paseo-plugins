@@ -1,6 +1,18 @@
 // App（plugin.rpc.invoke）与插件之间的 RPC 契约。App 已上线，字段名与语义不得改动。
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { scheduleID, scheduleNotificationState } from "./schedule-notifications.ts";
+
+export const scheduleNotificationsRead = defineRpc({
+  name: "schedule.notifications.read",
+  input: z.object({ scheduleId: scheduleID.optional() }),
+  output: scheduleNotificationState,
+});
+export const scheduleNotificationsWrite = defineRpc({
+  name: "schedule.notifications.write",
+  input: z.object({ scheduleId: scheduleID, enabled: z.boolean(), expectedRevision: z.string() }),
+  output: scheduleNotificationState,
+});
 
 // 令牌：App 传小写 hex；这里兼容大写并统一转小写（令牌会拼进 APNs 请求路径，必须严格校验）。
 const token = z.string().min(1).max(512).regex(/^[0-9a-fA-F]+$/, "令牌必须是 hex").transform(v => v.toLowerCase());
@@ -59,6 +71,13 @@ export const lastPushSchema = z.object({
   at: z.number(), ok: z.boolean(), status: z.number().nullable(), reason: z.string().nullable(),
 });
 export type LastPush = z.output<typeof lastPushSchema>;
+
+const barkStatusSchema = z.object({ configured: z.boolean(), serverURL: z.string().nullable(), notifyOnFinish: z.boolean(), lastPush: lastPushSchema.nullable() });
+export const barkStatus = defineRpc({ name: "bark.status", input: z.object({}), output: barkStatusSchema });
+export const barkConfigure = defineRpc({ name: "bark.configure", input: z.object({ pushURL: z.string().min(1).max(4096) }), output: barkStatusSchema });
+export const barkClear = defineRpc({ name: "bark.clear", input: z.object({}), output: barkStatusSchema });
+export const barkTest = defineRpc({ name: "bark.test", input: z.object({}), output: lastPushSchema });
+export const barkPreferences = defineRpc({ name: "bark.preferences", input: z.object({ notifyOnFinish: z.boolean() }), output: barkStatusSchema });
 
 export const activityStatus = defineRpc({
   name: "activity.status",
