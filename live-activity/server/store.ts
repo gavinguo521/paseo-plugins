@@ -21,7 +21,7 @@ async function readJson(path: string): Promise<unknown> {
 }
 
 /** 先写临时文件（0600）再改名，避免写一半被读到。 */
-async function writeSecret(path: string, value: unknown) {
+export async function writeSecret(path: string, value: unknown) {
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
   await chmod(tmp, 0o600);

@@ -10,7 +10,7 @@ const event = (shouldPush?: boolean, reason: "finished" | "permission" | "error"
   },
 });
 
-test("按事件消费官方决策；不以会话列表、手机断连后的活跃缓存重新判断", async () => {
+test("事件保留官方推送决策，交由 APNs 和显式 Bark 订阅分别处理", async () => {
   const notifications: unknown[] = [];
   const options: unknown[] = [];
   let update!: (value: unknown) => void;
@@ -29,15 +29,15 @@ test("按事件消费官方决策；不以会话列表、手机断连后的活�
   await source.start();
   assert.deepEqual(options, [{ notifications: false }]);
   update(event(false)); // 正在 Mac 查看，或最近活跃端已接收。
-  assert.equal(notifications.length, 0);
+  assert.equal(notifications.length, 1);
   update(event(true)); // 断连后 daemon 当场改判推送，无镜像租约等待。
-  assert.equal(notifications.length, 1);
-  update(event(false, "error"));
-  assert.equal(notifications.length, 1);
-  update(event(true, "permission"));
   assert.equal(notifications.length, 2);
-  update(event(undefined)); // 旧 daemon 兼容路径，不冒充完整支持。
+  update(event(false, "error"));
+  assert.equal(notifications.length, 2);
+  update(event(true, "permission"));
   assert.equal(notifications.length, 3);
+  update(event(undefined)); // 旧 daemon 兼容路径，不冒充完整支持。
+  assert.equal(notifications.length, 4);
   await source.close();
   assert.equal(released, 1);
 });
